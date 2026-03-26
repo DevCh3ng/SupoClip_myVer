@@ -3,7 +3,7 @@ Worker tasks - background jobs processed by arq workers.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 
 from ..observability import configure_logging, set_trace_id
@@ -26,6 +26,7 @@ async def process_video_task(
     processing_mode: str = "fast",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    webcam_box: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -85,6 +86,7 @@ async def process_video_task(
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                webcam_box=webcam_box,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

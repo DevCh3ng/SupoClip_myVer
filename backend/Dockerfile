@@ -6,6 +6,9 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     unzip \
+    git \
+    build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Install deno (required by yt-dlp for YouTube JS challenge solving)
@@ -29,6 +32,15 @@ RUN uv venv .venv && uv sync
 # Also install from git to get the very latest commits
 RUN uv pip install --upgrade --force-reinstall yt-dlp
 RUN uv pip install --upgrade --force-reinstall "yt-dlp[default]"
+
+# Clone and build whisper.cpp
+RUN git clone https://github.com/ggml-org/whisper.cpp.git && \
+    cd whisper.cpp && \
+    cmake -B build -DBUILD_SHARED_LIBS=OFF && \
+    cmake --build build -j --config Release && \
+    sh ./models/download-ggml-model.sh base.en && \
+    find build -name "*.so*" -exec cp {} /usr/local/lib/ \; && \
+    ldconfig
 
 # Copy source code
 COPY src/ ./src/

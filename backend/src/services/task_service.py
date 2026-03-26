@@ -81,6 +81,7 @@ class TaskService:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        webcam_box: Optional[str] = None,
     ) -> str:
         """
         Create a new task with associated source.
@@ -117,6 +118,7 @@ class TaskService:
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            webcam_box=webcam_box,
         )
 
         logger.info(f"Created task {task_id} for user {user_id}")
@@ -134,6 +136,7 @@ class TaskService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        webcam_box: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
@@ -200,6 +203,7 @@ class TaskService:
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                webcam_box=webcam_box,
                 cached_transcript=cached_transcript,
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
@@ -254,6 +258,7 @@ class TaskService:
                     caption_template,
                     output_format,
                     add_subtitles,
+                    webcam_box,
                 )
                 if clip_info is None:
                     continue  # Skip failed clip
@@ -534,7 +539,7 @@ class TaskService:
             if source_payload:
                 parsed = json.loads(source_payload)
                 of = parsed.get("output_format", output_format)
-                if of in ("vertical", "original"):
+                if of in ("vertical", "original", "gaming"):
                     output_format = of
                 asub = parsed.get("add_subtitles", add_subtitles)
                 if isinstance(asub, bool):

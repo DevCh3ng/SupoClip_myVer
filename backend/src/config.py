@@ -126,12 +126,12 @@ class Config:
         Falls back to Google for backward compatibility.
         """
         if self.google_api_key:
-            return "google-gla:gemini-3-flash-preview"
+            return "google-gla:gemini-2.0-flash"
         if self.openai_api_key:
-            return "openai:gpt-5.2"
+            return "openai:gpt-4o-mini"
         if self.anthropic_api_key:
-            return "anthropic:claude-4-sonnet"
-        return "google-gla:gemini-3-flash-preview"
+            return "anthropic:claude-3-5-haiku-latest"
+        return "google-gla:gemini-2.0-flash"
 
 
 def get_config() -> Config:

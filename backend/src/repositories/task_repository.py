@@ -28,6 +28,7 @@ class TaskRepository:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        webcam_box: Optional[str] = None,
     ) -> str:
         """Create a new task and return its ID."""
         task_id = str(uuid4())
@@ -36,12 +37,12 @@ class TaskRepository:
                 text("""
                     INSERT INTO tasks (
                         id, user_id, source_id, status, font_family, font_size, font_color,
-                        caption_template, include_broll, processing_mode,
+                        caption_template, include_broll, processing_mode, webcam_box,
                         created_at, updated_at
                     )
                     VALUES (
                         :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
-                        :caption_template, :include_broll, :processing_mode,
+                        :caption_template, :include_broll, :processing_mode, :webcam_box,
                         NOW(), NOW()
                     )
                     RETURNING id
@@ -57,6 +58,7 @@ class TaskRepository:
                     "caption_template": caption_template,
                     "include_broll": include_broll,
                     "processing_mode": processing_mode,
+                    "webcam_box": webcam_box,
                 },
             )
         except Exception:
@@ -146,6 +148,7 @@ class TaskRepository:
                 row, "completion_notification_sent_at", None
             ),
             "source_url": getattr(row, "source_url", None),
+            "webcam_box": getattr(row, "webcam_box", None),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }

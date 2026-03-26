@@ -12,12 +12,51 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 
 import cv2
-from moviepy import VideoFileClip, CompositeVideoClip, TextClip, ColorClip
-from moviepy.video.fx import CrossFadeIn, CrossFadeOut, FadeIn, FadeOut
+try:
+    from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip, ColorClip
+    from moviepy.video.fx.all import fadein, fadeout
+    # Create aliases for v2-style names if needed
+    FadeIn = fadein
+    FadeOut = fadeout
+except ImportError:
+    try:
+        from moviepy import VideoFileClip, CompositeVideoClip, TextClip, ColorClip
+        from moviepy.video.fx import FadeIn, FadeOut
+    except ImportError:
+        # Fallback for minimal environments
+        VideoFileClip = None
+        CompositeVideoClip = None
+        TextClip = None
+        ColorClip = None
+        FadeIn = None
+        FadeOut = None
 
-import assemblyai as aai
 import srt
 from datetime import timedelta
+import subprocess
+
+class MockWord:
+    def __init__(self, text, start, end, confidence=1.0, speaker=None):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.confidence = confidence
+        self.speaker = speaker
+
+class MockUtterance:
+    def __init__(self, text, start, end, words, speaker=None):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.words = words
+        self.speaker = speaker
+
+class MockTranscript:
+    def __init__(self, text, words, utterances):
+        self.text = text
+        self.words = words
+        self.utterances = utterances
+        self.status = "completed"
 
 from .config import Config
 from .caption_templates import get_template, CAPTION_TEMPLATES
@@ -26,6 +65,26 @@ from .font_registry import find_font_path
 logger = logging.getLogger(__name__)
 config = Config()
 TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
+
+def process_bg(frame):
+    """Blur and dim a frame for use as a background."""
+    frame_blur = cv2.GaussianBlur(frame, (51, 51), 0)
+    return (frame_blur * 0.5).astype(np.uint8)
+
+
+def apply_image_transform(clip, fn):
+    """Apply a per-frame image transformation, compatible with MoviePy 1.x and 2.x."""
+    # MoviePy 2.0+ renamed fl_image -> image_transform
+    if hasattr(clip, "image_transform"):
+        return clip.image_transform(fn)
+    # Some intermediate 2.x builds exposed with_image_transformation
+    if hasattr(clip, "with_image_transformation"):
+        return clip.with_image_transformation(fn)
+    # MoviePy 1.x
+    if hasattr(clip, "fl_image"):
+        return clip.fl_image(fn)
+    # Last-resort: use fl() which is available in all versions
+    return clip.fl(lambda gf, t: fn(gf(t)), apply_to="mask")
 
 
 class VideoProcessor:
@@ -47,68 +106,161 @@ class VideoProcessor:
             resolved_font = find_font_path("THEBOLDFONT")
         self.font_path = str(resolved_font) if resolved_font else ""
 
+    def _check_nvenc_available(self) -> bool:
+        """Dynamically check if FFmpeg has nvenc compiled in and working."""
+        try:
+            # -encoders output contains 'h264_nvenc' if the encoder is compiled in
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"], 
+                capture_output=True, 
+                text=True, 
+                check=True
+            )
+            return "h264_nvenc" in result.stdout
+        except Exception:
+            return False
+
     def get_optimal_encoding_settings(
         self, target_quality: str = "high"
     ) -> Dict[str, Any]:
-        """Get optimal encoding settings for different quality levels."""
-        settings = {
-            "high": {
-                "codec": "libx264",
-                "audio_codec": "aac",
-                "audio_bitrate": "256k",
-                "preset": "slow",
-                "ffmpeg_params": [
-                    "-crf",
-                    "18",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-profile:v",
-                    "high",
-                    "-movflags",
-                    "+faststart",
-                    "-sws_flags",
-                    "lanczos",
-                ],
-            },
-            "medium": {
-                "codec": "libx264",
-                "audio_codec": "aac",
-                "bitrate": "4000k",
-                "audio_bitrate": "192k",
-                "preset": "fast",
-                "ffmpeg_params": ["-crf", "23", "-pix_fmt", "yuv420p"],
-            },
-        }
+        """Get optimal encoding settings with automatic GPU fallback support."""
+        use_gpu = self._check_nvenc_available()
+        
+        if use_gpu:
+            logger.info("NVENC supported on FFmpeg. Using Nvidia GPU for rendering.")
+            settings = {
+                "high": {
+                    "codec": "h264_nvenc",
+                    "audio_codec": "aac",
+                    "audio_bitrate": "256k",
+                    "preset": "p6",  # NVENC uses p1-p7 presets
+                    "ffmpeg_params": [
+                        "-b:v", "8M",
+                        "-maxrate", "12M",
+                        "-pix_fmt", "yuv420p",
+                        "-profile:v", "high",
+                        "-movflags", "+faststart",
+                    ],
+                },
+                "medium": {
+                    "codec": "h264_nvenc",
+                    "audio_codec": "aac",
+                    "bitrate": "4000k",
+                    "audio_bitrate": "192k",
+                    "preset": "p4",
+                    "ffmpeg_params": ["-b:v", "4M", "-pix_fmt", "yuv420p"],
+                },
+            }
+        else:
+            logger.info("NVENC not available on FFmpeg. Falling back to CPU rendering.")
+            settings = {
+                "high": {
+                    "codec": "libx264",
+                    "audio_codec": "aac",
+                    "audio_bitrate": "256k",
+                    "preset": "slow",
+                    "ffmpeg_params": [
+                        "-crf", "18",
+                        "-pix_fmt", "yuv420p",
+                        "-profile:v", "high",
+                        "-movflags", "+faststart",
+                        "-sws_flags", "lanczos",
+                    ],
+                },
+                "medium": {
+                    "codec": "libx264",
+                    "audio_codec": "aac",
+                    "bitrate": "4000k",
+                    "audio_bitrate": "192k",
+                    "preset": "fast",
+                    "ffmpeg_params": ["-crf", "23", "-pix_fmt", "yuv420p"],
+                },
+            }
+        
         return settings.get(target_quality, settings["high"])
 
 
 def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
-    """Get transcript using AssemblyAI with word-level timing for precise subtitles."""
-    logger.info(f"Getting transcript for: {video_path}")
+    """Get transcript using whisper.cpp with word-level timing for precise subtitles."""
+    logger.info(f"Getting offline transcript for: {video_path}")
 
-    # Configure AssemblyAI
-    aai.settings.api_key = config.assembly_ai_api_key
-    transcriber = aai.Transcriber()
-
-    # Request word-level timestamps for precise subtitle sync
-    speech_model_value = aai.SpeechModel.best
-    if speech_model == "nano":
-        speech_model_value = aai.SpeechModel.nano
-
-    config_obj = aai.TranscriptionConfig(
-        speaker_labels=True,
-        punctuate=True,
-        format_text=True,
-        speech_model=speech_model_value,
-    )
+    # Use a temporary wav file for whisper.cpp
+    wav_path = video_path.with_suffix(".whisper.wav")
+    json_out_prefix = video_path.with_suffix(".whisper")
+    json_path = Path(f"{json_out_prefix}.json")
 
     try:
-        logger.info("Starting AssemblyAI transcription")
-        transcript = transcriber.transcribe(str(video_path), config=config_obj)
+        # Extract 16kHz mono audio via ffmpeg
+        logger.info("Extracting audio for transcription...")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav_path)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        if transcript.status == aai.TranscriptStatus.error:
-            logger.error(f"AssemblyAI transcription failed: {transcript.error}")
-            raise Exception(f"Transcription failed: {transcript.error}")
+        # Map 'speech_model' directly to the downloaded model or base.en
+        model_name = "ggml-base.en.bin"  # Default fallback
+        # In the future, this can map "fast" -> "ggml-nano.en.bin", etc.
+        
+        whisper_bin = "/app/whisper.cpp/build/bin/whisper-cli"
+        model_bin = f"/app/whisper.cpp/models/{model_name}"
+        
+        logger.info(f"Starting offline whisper.cpp transcription using {model_name}")
+        subprocess.run([
+            whisper_bin,
+            "-m", model_bin,
+            "-f", str(wav_path),
+            "-ojf", "-sow",
+            "-of", str(json_out_prefix)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if not json_path.exists():
+            raise Exception("whisper.cpp did not output the expected JSON file.")
+
+        with open(json_path, "r") as f:
+            whisper_data = json.load(f)
+
+        mock_utterances = []
+        all_mock_words = []
+        full_text_list = []
+
+        segments = whisper_data.get("transcription", [])
+        for segment in segments:
+            seg_start = int(segment["offsets"]["from"])
+            seg_end = int(segment["offsets"]["to"])
+            seg_text = segment.get("text", "").strip()
+            
+            # Words
+            segment_words = []
+            for token in segment.get("tokens", []):
+                t_text = token.get("text", "")
+                # Skip special whisper tokens like [_BEG_], [_TT_550]
+                if t_text.startswith("[_") and t_text.endswith("_]"):
+                    continue
+
+                w_start = int(token["offsets"]["from"])
+                w_end = int(token["offsets"]["to"])
+                w_conf = float(token.get("p", 1.0))
+                
+                # Cleanup whisper word output (remove leading/trailing spaces for alignment)
+                # But we keep original text slightly cleaned so MoviePy doesn't crash on spaces
+                clean_t_text = t_text.strip()
+                if not clean_t_text:
+                    continue
+
+                w = MockWord(clean_t_text, w_start, w_end, w_conf)
+                segment_words.append(w)
+                all_mock_words.append(w)
+
+            if seg_text:
+                full_text_list.append(seg_text)
+                u = MockUtterance(seg_text, seg_start, seg_end, segment_words)
+                mock_utterances.append(u)
+
+        transcript = MockTranscript(
+            text=" ".join(full_text_list),
+            words=all_mock_words,
+            utterances=mock_utterances
+        )
 
         formatted_lines = format_transcript_for_analysis(transcript)
 
@@ -124,6 +276,13 @@ def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
     except Exception as e:
         logger.error(f"Error in transcription: {e}")
         raise
+        
+    finally:
+        # Cleanup temp files
+        if wav_path.exists():
+            wav_path.unlink()
+        if json_path.exists():
+            json_path.unlink()
 
 
 def cache_transcript_data(video_path: Path, transcript) -> None:
@@ -377,7 +536,6 @@ def detect_optimal_crop_region(
             f"Crop dimensions: {new_width}x{new_height} at offset ({x_offset}, {y_offset})"
         )
         return (x_offset, y_offset, new_width, new_height)
-
     except Exception as e:
         logger.error(f"Error in crop detection: {e}")
         # Fallback to center crop
@@ -401,6 +559,179 @@ def detect_optimal_crop_region(
         )
 
         return (x_offset, y_offset, new_width, new_height)
+
+
+def detect_gaming_layout(
+    video_clip: VideoFileClip, start_time: float, end_time: float
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Detect if there's a small webcam in a corner using improved averaging and outlier filtering.
+    Returns (x, y, w, h) of the webcam if found, else None.
+    """
+    face_centers = detect_faces_in_clip(video_clip, start_time, end_time)
+    if not face_centers:
+        return None
+
+    frame_w, frame_h = video_clip.size
+    frame_area = frame_w * frame_h
+
+    # 1. Filter out outliers to avoid posters/rugs from biasing the average
+    face_centers = filter_face_outliers(face_centers)
+    if not face_centers:
+        return None
+
+    # 2. Extract components
+    areas = [f[2] for f in face_centers]
+    
+    # Check if the "average" face is small enough to be a webcam (< 15% of frame)
+    avg_area = sum(areas) / len(areas)
+    if avg_area / frame_area < 0.15:
+        # Determine the average center
+        avg_x = sum(f[0] for f in face_centers) / len(face_centers)
+        avg_y = sum(f[1] for f in face_centers) / len(face_centers)
+
+        # Calculate crop size (expanding face box to capture webcam frame)
+        side = int(np.sqrt(avg_area) * 2.5)
+        
+        # Ensure it's even for MoviePy
+        x = round_to_even(max(0, int(avg_x - side // 2)))
+        y = round_to_even(max(0, int(avg_y - side // 2)))
+        w = round_to_even(min(side, frame_w - x))
+        h = round_to_even(min(side, frame_h - y))
+        
+        return (x, y, w, h)
+
+    return None
+
+
+def create_gaming_split_clip(
+    clip: VideoFileClip,
+    webcam_box: Tuple[int, int, int, int] | str,
+    target_w: int = 1080,
+    target_h: int = 1920,
+) -> CompositeVideoClip:
+    """
+    Creates a 9:16 gaming layout with blurred background filling.
+    webcam_box: list/tuple (x, y, w, h) or string "x,y,w,h"
+    """
+    if isinstance(webcam_box, str):
+        try:
+            webcam_box = tuple(map(int, webcam_box.split(',')))
+        except Exception:
+            logger.error(f"Failed to parse webcam_box string: {webcam_box}")
+            # Fallback will happen in create_optimized_clip if we return something better or just let it fail
+            x, y, w, h = 0, 0, clip.w, clip.h
+        else:
+            x, y, w, h = webcam_box
+    else:
+        x, y, w, h = webcam_box
+
+    src_w, src_h = clip.w, clip.h
+
+    # 1. Webcam Section (Top 35%)
+    webcam_target_h = int(target_h * 0.35)
+    
+    # Crop the webcam source
+    try:
+        webcam_crop = clip.cropped(x1=x, y1=y, x2=min(src_w, x + w), y2=min(src_h, y + h))
+    except AttributeError:
+        webcam_crop = clip.crop(x1=x, y1=y, x2=min(src_w, x + w), y2=min(src_h, y + h))
+
+    # Blurred Webcam BG (Center-cropped to avoid distortion)
+    wb_target_aspect = target_w / webcam_target_h
+    if (w / h) > wb_target_aspect:
+        # Source is wider, crop sides
+        wb_crop_w = int(h * wb_target_aspect)
+        wb_crop_h = h
+    else:
+        # Source is taller, crop top/bottom
+        wb_crop_w = w
+        wb_crop_h = int(w / wb_target_aspect)
+    
+    wb_bg_x = x + (w - wb_crop_w) // 2
+    wb_bg_y = y + (h - wb_crop_h) // 2
+    
+    try:
+        wb_bg_crop = clip.cropped(x1=wb_bg_x, y1=wb_bg_y, x2=wb_bg_x+wb_crop_w, y2=wb_bg_y+wb_crop_h)
+    except AttributeError:
+        wb_bg_crop = clip.crop(x1=wb_bg_x, y1=wb_bg_y, x2=wb_bg_x+wb_crop_w, y2=wb_bg_y+wb_crop_h)
+
+    try:
+        wb_bg = wb_bg_crop.resized(width=target_w, height=webcam_target_h)
+    except AttributeError:
+        wb_bg = wb_bg_crop.resize(width=target_w, height=webcam_target_h)
+
+    wb_bg_blur = apply_image_transform(wb_bg, process_bg)
+    
+    # Webcam FG (Fitting)
+    try:
+        webcam_fg = webcam_crop.resized(height=webcam_target_h)
+    except AttributeError:
+        webcam_fg = webcam_crop.resize(height=webcam_target_h)
+
+    if webcam_fg.w > target_w:
+        try:
+            webcam_fg = webcam_fg.resized(width=target_w)
+        except AttributeError:
+            webcam_fg = webcam_fg.resize(width=target_w)
+            
+    webcam_section = CompositeVideoClip(
+        [wb_bg_blur, webcam_fg.with_position("center")],
+        size=(target_w, webcam_target_h)
+    )
+
+    # 2. Gameplay Section (Bottom 65%)
+    gameplay_h = target_h - webcam_target_h
+    gameplay_w = target_w
+    
+    # For gameplay, we usually want to crop the center 16:9 or similar
+    # But here we just take the whole width and fit it
+    gp_target_aspect = gameplay_w / gameplay_h
+    if src_w / src_h > gp_target_aspect:
+        gp_crop_w = int(src_h * gp_target_aspect)
+        gp_crop_h = src_h
+    else:
+        gp_crop_w = src_w
+        gp_crop_h = int(src_w / gp_target_aspect)
+        
+    gp_x = (src_w - gp_crop_w) // 2
+    gp_y = (src_h - gp_crop_h) // 2
+    
+    try:
+        gp_crop = clip.cropped(x1=gp_x, y1=gp_y, x2=gp_x+gp_crop_w, y2=gp_y+gp_crop_h)
+    except AttributeError:
+        gp_crop = clip.crop(x1=gp_x, y1=gp_y, x2=gp_x+gp_crop_w, y2=gp_y+gp_crop_h)
+
+    # Blurred Gameplay BG
+    try:
+        gp_bg = gp_crop.resized(width=gameplay_w, height=gameplay_h)
+    except AttributeError:
+        gp_bg = gp_crop.resize(width=gameplay_w, height=gameplay_h)
+
+    gp_bg_blur = apply_image_transform(gp_bg, process_bg)
+    
+    # Gameplay FG (Fitting)
+    try:
+        gameplay_fg = gp_crop.resized(height=gameplay_h)
+    except AttributeError:
+        gameplay_fg = gp_crop.resize(height=gameplay_h)
+
+    if gameplay_fg.w > gameplay_w:
+        try:
+            gameplay_fg = gameplay_fg.resized(width=gameplay_w)
+        except AttributeError:
+            gameplay_fg = gameplay_fg.resize(width=gameplay_w)
+        
+    gameplay_section = CompositeVideoClip(
+        [gp_bg_blur, gameplay_fg.with_position("center")],
+        size=(gameplay_w, gameplay_h)
+    )
+    
+    # 3. Stack them
+    webcam_section = webcam_section.with_position(("center", "top"))
+    gameplay_section = gameplay_section.with_position(("center", webcam_target_h))
+    
+    return CompositeVideoClip([gameplay_section, webcam_section], size=(target_w, target_h))
 
 
 def detect_faces_in_clip(
@@ -1161,6 +1492,7 @@ def create_optimized_clip(
     font_color: str = "#FFFFFF",
     caption_template: str = "default",
     output_format: str = "vertical",
+    webcam_box: Optional[str] = None,
 ) -> bool:
     """Create clip with optional subtitles. output_format: 'vertical' (9:16) or 'original' (keep source size)."""
     try:
@@ -1219,6 +1551,34 @@ def create_optimized_clip(
             target_height = round_to_even(processed_clip.h)
             if (target_width, target_height) != (processed_clip.w, processed_clip.h):
                 processed_clip = processed_clip.resized((target_width, target_height))
+            cropped_clip = None
+        elif output_format == "gaming":
+            # Gaming Split-Screen: Webcam top, Gameplay bottom
+            target_width, target_height = 1080, 1920
+            
+            # Use manual webcam_box if provided, otherwise detect
+            box_to_use = webcam_box if webcam_box else detect_gaming_layout(video, start_time, end_time)
+            
+            if box_to_use:
+                processed_clip = create_gaming_split_clip(
+                    clip, box_to_use, target_width, target_height
+                )
+                logger.info(f"Created gaming split-style clip (manual={bool(webcam_box)})")
+            else:
+                # Fallback to standard vertical if no webcam found
+                x_offset, y_offset, new_width, new_height = detect_optimal_crop_region(
+                    video, start_time, end_time, target_ratio=9 / 16
+                )
+                try:
+                    processed_clip = clip.cropped(
+                        x1=x_offset, y1=y_offset, x2=x_offset + new_width, y2=y_offset + new_height
+                    ).resized(height=target_height)
+                except AttributeError:
+                    processed_clip = clip.crop(
+                        x1=x_offset, y1=y_offset, x2=x_offset + new_width, y2=y_offset + new_height
+                    ).resize(height=target_height)
+                logger.info("Fallback to standard vertical clip (no webcam detected)")
+            
             cropped_clip = None
         else:
             # Vertical 9:16: face-centered crop, preserve native resolution

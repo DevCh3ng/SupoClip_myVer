@@ -21,6 +21,9 @@ import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, 
 import { Switch } from "@/components/ui/switch";
 import LandingPage from "@/components/landing-page";
 import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
+import WebcamCropModal from "@/components/webcam-crop-modal";
+import CompositionPreview from "@/components/composition-preview";
+import { Move } from "lucide-react";
 
 interface LatestTask {
   id: string;
@@ -116,8 +119,11 @@ export default function Home() {
   const [availableTemplates, setAvailableTemplates] = useState<Array<{ id: string, name: string, description: string, animation: string, font_family?: string, font_size?: number, font_color?: string }>>([]);
   const [includeBroll, setIncludeBroll] = useState(false);
   const [brollAvailable, setBrollAvailable] = useState(false);
-  const [outputFormat, setOutputFormat] = useState<"vertical" | "original">("vertical");
+  const [outputFormat, setOutputFormat] = useState<"vertical" | "original" | "gaming">("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
+  const [webcamBox, setWebcamBox] = useState(""); // Format: x,y,w,h
+  const [isCropModalOpen, setIsCropModalOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // Latest task state
   const [latestTask, setLatestTask] = useState<LatestTask | null>(null);
@@ -278,10 +284,49 @@ export default function Home() {
   // Always treat file input as uncontrolled, and store file in a ref
   const fileRef = useRef<File | null>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const captureFrame = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.src = URL.createObjectURL(file);
+      video.muted = true;
+      video.playsInline = true;
+
+      video.onloadedmetadata = () => {
+        // Seek to 50% through the video
+        video.currentTime = video.duration / 2;
+      };
+
+      video.onseeked = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+          resolve(dataUrl);
+        }
+        // Cleanup
+        URL.revokeObjectURL(video.src);
+      };
+
+      video.onerror = () => {
+        resolve(""); // Fallback
+      };
+    });
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
     fileRef.current = file;
     setFileName(file ? file.name : null);
+    if (file) {
+      const frameUrl = await captureFrame(file);
+      setPreviewUrl(frameUrl);
+    } else {
+      setPreviewUrl(null);
+    }
   };
 
   const handleTemplateChange = (templateId: string) => {
@@ -450,7 +495,8 @@ export default function Home() {
           include_broll: includeBroll,
           processing_mode: "fast",
           output_format: outputFormat,
-          add_subtitles: addSubtitles
+          add_subtitles: addSubtitles,
+          webcam_box: outputFormat === "gaming" ? webcamBox : null
         }),
       });
 
@@ -911,20 +957,85 @@ export default function Home() {
                   )}
 
                   {/* Output format */}
-                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
-                    <div className="flex items-center gap-3">
-                      <Monitor className="w-4 h-4 text-blue-500" />
-                      <div>
-                        <h3 className="text-sm font-medium text-stone-900">Wide format</h3>
-                        <p className="text-xs text-stone-500">Keep original aspect ratio instead of 9:16 vertical</p>
+                  <div className="space-y-2">
+                    <label className="text-sm text-stone-600">
+                      Output Format
+                    </label>
+                    <div className="flex items-center gap-3 p-3 border rounded-lg bg-stone-50">
+                      <Monitor className="w-4 h-4 text-blue-500 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <Select value={outputFormat} onValueChange={(val) => setOutputFormat(val as any)} disabled={isLoading}>
+                          <SelectTrigger className="w-full bg-transparent border-none p-0 h-auto focus:ring-0">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="vertical">
+                              <div className="flex flex-col">
+                                <span className="font-medium">Vertical (9:16)</span>
+                                <span className="text-xs text-stone-500">Perfect for TikTok, Reels, Shorts</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="gaming">
+                              <div className="flex flex-col">
+                                <span className="font-medium">Gaming Split-Screen</span>
+                                <span className="text-xs text-stone-500">Stacked Webcam + Gameplay</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="original">
+                              <div className="flex flex-col">
+                                <span className="font-medium">Original (Wide)</span>
+                                <span className="text-xs text-stone-500">Keep source aspect ratio</span>
+                              </div>
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
                     </div>
-                    <Switch
-                      checked={outputFormat === "original"}
-                      onCheckedChange={(checked) => setOutputFormat(checked ? "original" : "vertical")}
-                      disabled={isLoading}
-                    />
                   </div>
+                  
+                  {outputFormat === "gaming" && (
+                    <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <label className="text-sm text-stone-600 flex items-center justify-between">
+                        <span>Webcam Framing (Optional)</span>
+                        <span className="text-[10px] text-stone-400 font-mono italic">x,y,w,h</span>
+                      </label>
+                      <div className="flex items-center gap-3 p-3 border rounded-lg bg-stone-50 group focus-within:border-stone-400 transition-colors">
+                        <Monitor className="w-4 h-4 text-stone-400 shrink-0 group-focus-within:text-stone-600" />
+                        <Input 
+                          placeholder="e.g. 1200,50,400,400"
+                          value={webcamBox}
+                          onChange={(e) => setWebcamBox(e.target.value)}
+                          className="flex-1 bg-transparent border-none p-0 h-auto focus:ring-0 text-sm font-mono"
+                          disabled={isLoading}
+                        />
+                      </div>
+                      
+                      {sourceType === "upload" && fileName && (
+                        <div className="space-y-4">
+                          <Button 
+                            type="button" 
+                            variant="outline" 
+                            size="sm" 
+                            className="w-full text-xs h-8 border-dashed border-stone-300 hover:border-stone-400 hover:bg-stone-50"
+                            onClick={() => setIsCropModalOpen(true)}
+                          >
+                            <Move className="w-3 h-3 mr-2" />
+                            Select Area Interactively
+                          </Button>
+
+                          <CompositionPreview 
+                            previewUrl={previewUrl}
+                            webcamBox={webcamBox}
+                            outputFormat={outputFormat}
+                          />
+                        </div>
+                      )}
+
+                      <p className="text-[10px] text-stone-500">
+                        Leave blank for auto-detection. Specify top-left corner and size.
+                      </p>
+                    </div>
+                  )}
 
                   {/* Add subtitles */}
                   <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
@@ -1403,6 +1514,13 @@ export default function Home() {
           </div>
         </div>
       </div>
+      
+      <WebcamCropModal 
+        isOpen={isCropModalOpen}
+        onClose={() => setIsCropModalOpen(false)}
+        onCropComplete={(cropStr) => setWebcamBox(cropStr)}
+        videoUrl={previewUrl}
+      />
     </div>
   );
 }

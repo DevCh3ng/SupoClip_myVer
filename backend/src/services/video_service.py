@@ -164,6 +164,7 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        webcam_box: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         try:
@@ -196,6 +197,7 @@ class VideoService:
                 font_color,
                 caption_template,
                 output_format,
+                webcam_box,
             )
 
             if not success:
@@ -259,6 +261,7 @@ class VideoService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        webcam_box: Optional[str] = None,
         cached_transcript: Optional[str] = None,
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,

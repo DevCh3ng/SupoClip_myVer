@@ -125,11 +125,12 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if processing_mode not in {"fast", "balanced", "quality"}:
         processing_mode = config.default_processing_mode
     output_format = data.get("output_format", "vertical")
-    if output_format not in {"vertical", "original"}:
+    if output_format not in {"vertical", "original", "gaming"}:
         output_format = "vertical"
     add_subtitles = data.get("add_subtitles", True)
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
+    webcam_box = data.get("webcam_box")
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -150,6 +151,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            webcam_box=webcam_box,
         )
 
         # Get source type for worker
@@ -173,6 +175,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             processing_mode,
             output_format,
             add_subtitles,
+            webcam_box,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -187,6 +190,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     "source_type": source_type,
                     "output_format": output_format,
                     "add_subtitles": add_subtitles,
+                    "webcam_box": webcam_box,
                 }),
                 ex=60 * 60 * 24 * 7,
             )
@@ -661,6 +665,7 @@ async def export_clip(
             raise HTTPException(status_code=404, detail="Clip not found")
 
         from pathlib import Path
+        config = get_config()
 
         output_path = export_with_preset(
             Path(clip["file_path"]),
@@ -691,6 +696,7 @@ async def cancel_task(
         if task.get("status") in ["completed", "error", "cancelled"]:
             return {"message": f"Task already in terminal state: {task.get('status')}"}
 
+        config = get_config()
         redis_client = redis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
@@ -745,7 +751,9 @@ async def resume_task(
         source_type = task.get("source_type")
         output_format = "vertical"
         add_subtitles = True
+        webcam_box = task.get("webcam_box")
 
+        config = get_config()
         redis_client = redis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
@@ -763,6 +771,8 @@ async def resume_task(
                 asub = parsed.get("add_subtitles", add_subtitles)
                 if isinstance(asub, bool):
                     add_subtitles = asub
+                if not webcam_box:
+                    webcam_box = parsed.get("webcam_box")
         finally:
             await redis_client.close()
 
@@ -801,6 +811,7 @@ async def resume_task(
             processing_mode,
             output_format,
             add_subtitles,
+            webcam_box,
         )
 
         return {"message": "Task resumed", "job_id": job_id}
@@ -814,6 +825,7 @@ async def resume_task(
 @router.get("/dead-letter/list")
 async def list_dead_letter_tasks():
     """List tasks that exhausted retries and landed in dead-letter store."""
+    config = get_config()
     redis_client = redis.Redis(
         host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
     )
