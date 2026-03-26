@@ -10,7 +10,8 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+import base64
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -565,12 +566,16 @@ def download_youtube_video(
     url: str,
     max_retries: int = 3,
     task_id: Optional[str] = None,
+    skip_if_exists: bool = False,
 ) -> Optional[Path]:
     """
     Download YouTube video with Apify as the primary provider and yt-dlp fallback.
     Returns the path to the downloaded file, or None if both providers fail.
+    
+    If skip_if_exists is True, it will check for an existing file with the same video_id
+    and return it instead of redownloading.
     """
-    logger.info("Starting YouTube download: %s", url)
+    logger.info("Starting YouTube download: %s (skip_if_exists=%s)", url, skip_if_exists)
 
     video_id = get_youtube_video_id(url)
     if not video_id:
@@ -578,6 +583,21 @@ def download_youtube_video(
         return None
 
     downloader = YouTubeDownloader()
+    
+    if skip_if_exists:
+        existing_files = [
+            file_path
+            for file_path in downloader.temp_dir.glob(f"{video_id}.*")
+            if file_path.is_file()
+            and file_path.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov", ".m4v"]
+        ]
+        if existing_files:
+            # Sort by size or quality if many exist, but usually there's only one.
+            # We'll just take the largest one as a proxy for 'best'.
+            existing_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+            logger.info("Using existing download for %s: %s", video_id, existing_files[0].name)
+            return existing_files[0]
+
     _remove_cached_downloads(downloader.temp_dir, video_id)
 
     config = get_config()
@@ -612,9 +632,10 @@ async def async_download_youtube_video(
     url: str,
     max_retries: int = 3,
     task_id: Optional[str] = None,
+    skip_if_exists: bool = False,
 ) -> Optional[Path]:
-    logger.info(f"Starting async YouTube download: {url}")
-    return await asyncio.to_thread(download_youtube_video, url, max_retries, task_id)
+    logger.info(f"Starting async YouTube download: {url} (skip_if_exists={skip_if_exists})")
+    return await asyncio.to_thread(download_youtube_video, url, max_retries, task_id, skip_if_exists)
 
 
 def get_video_duration(url: str) -> Optional[int]:
@@ -659,6 +680,66 @@ def cleanup_downloaded_files(video_id: str):
                 logger.info(f"Cleaned up: {file_path.name}")
         except Exception as e:
             logger.warning(f"Failed to cleanup {file_path.name}: {e}")
+
+
+async def get_youtube_preview_frame(url: str, timestamp: int = 15) -> Optional[str]:
+    """
+    Get a single preview frame from a YouTube video as a base64 string.
+    Downloads the video first (using cached version if skip_if_exists is passed) 
+    and then extracts the frame.
+    """
+    try:
+        # 1. Download the video (or use existing)
+        # Using to_thread since download_youtube_video is blocking
+        local_path = await asyncio.to_thread(download_youtube_video, url, skip_if_exists=True)
+        
+        if not local_path or not local_path.exists():
+            logger.warning(f"Could not download video for preview: {url}. Falling back to thumbnail.")
+            video_id = get_youtube_video_id(url)
+            if video_id:
+                return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+            return None
+
+        # 2. Extract a frame using ffmpeg from the local file
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss", str(timestamp),
+            "-i", str(local_path),
+            "-vframes", "1",
+            "-q:v", "5",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "pipe:1"
+        ]
+        
+        # Use asyncio subprocess for non-blocking extraction
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"FFmpeg preview extraction failed from local file: {stderr.decode()}")
+            # Fallback to thumbnail
+            video_id = get_youtube_video_id(url)
+            if video_id:
+                return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+            return None
+        
+        # 3. Convert to base64
+        base64_frame = base64.b64encode(stdout).decode("utf-8")
+        return f"data:image/jpeg;base64,{base64_frame}"
+
+    except Exception as e:
+        logger.error(f"Error getting youtube preview frame: {e}")
+        # Last resort fallback
+        video_id = get_youtube_video_id(url)
+        if video_id:
+            return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+        return None
 
 
 # Backward compatibility functions

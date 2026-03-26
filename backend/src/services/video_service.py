@@ -33,6 +33,22 @@ class VideoService:
     """Service for video processing operations."""
 
     @staticmethod
+    async def get_preview_frame(url: str) -> Optional[str]:
+        """
+        Fetch a preview frame from a video URL (YouTube or local).
+        Returns base64 data URL.
+        """
+        video_id = get_youtube_video_id(url)
+        if video_id:
+            # For YouTube, use our optimized extraction
+            from ..youtube_utils import get_youtube_preview_frame
+            return await get_youtube_preview_frame(url)
+        
+        # For local files/uploads, we could implement similar logic if needed,
+        # but the frontend already handles local file previews.
+        return None
+
+    @staticmethod
     def _get_file_duration(path: Path) -> Optional[float]:
         """Return video duration in seconds via ffprobe, or None on failure."""
         try:
@@ -63,7 +79,7 @@ class VideoService:
         Download a YouTube video asynchronously.
         """
         logger.info(f"Starting video download: {url}")
-        video_path = await async_download_youtube_video(url, 3, task_id)
+        video_path = await async_download_youtube_video(url, 3, task_id, skip_if_exists=True)
 
         if not video_path:
             logger.error(f"Failed to download video: {url}")

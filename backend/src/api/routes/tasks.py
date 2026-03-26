@@ -845,3 +845,25 @@ async def list_dead_letter_tasks():
         return {"total": len(items), "tasks": items}
     finally:
         await redis_client.close()
+@router.post("/youtube-preview")
+async def get_youtube_preview(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Get a preview frame from a YouTube URL for manual framing.
+    """
+    try:
+        data = await request.json()
+        url = data.get("url")
+        if not url:
+            raise HTTPException(status_code=400, detail="URL is required")
+
+        task_service = TaskService(db)
+        frame_base64 = await task_service.video_service.get_preview_frame(url)
+        
+        if not frame_base64:
+            raise HTTPException(status_code=500, detail="Failed to extract preview frame")
+            
+        return {"frame": frame_base64}
+
+    except Exception as e:
+        logger.error(f"Error getting youtube preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
