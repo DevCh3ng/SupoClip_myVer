@@ -130,6 +130,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     add_subtitles = data.get("add_subtitles", True)
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
+    quality = data.get("quality", "high")
+    if quality not in {"high", "medium", "low"}:
+        quality = "high"
     webcam_box = data.get("webcam_box")
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
@@ -152,6 +155,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             include_broll=include_broll,
             processing_mode=processing_mode,
             webcam_box=webcam_box,
+            quality=quality,
         )
 
         # Get source type for worker
@@ -176,6 +180,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             output_format,
             add_subtitles,
             webcam_box,
+            quality,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -191,6 +196,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     "output_format": output_format,
                     "add_subtitles": add_subtitles,
                     "webcam_box": webcam_box,
+                    "quality": quality,
                 }),
                 ex=60 * 60 * 24 * 7,
             )

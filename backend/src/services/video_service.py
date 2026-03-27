@@ -3,7 +3,7 @@ Video service - handles video processing business logic.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, Awaitable
+from typing import List, Dict, Any, Optional, Callable, Awaitable, Tuple
 import logging
 import json
 import subprocess
@@ -74,12 +74,12 @@ class VideoService:
         return Path(url)
 
     @staticmethod
-    async def download_video(url: str, task_id: Optional[str] = None) -> Optional[Path]:
+    async def download_video(url: str, task_id: Optional[str] = None, quality: str = "high") -> Optional[Path]:
         """
         Download a YouTube video asynchronously.
         """
-        logger.info(f"Starting video download: {url}")
-        video_path = await async_download_youtube_video(url, 3, task_id, skip_if_exists=True)
+        logger.info(f"Starting video download: {url} (quality: {quality})")
+        video_path = await async_download_youtube_video(url, 3, task_id, skip_if_exists=True, quality=quality)
 
         if not video_path:
             logger.error(f"Failed to download video: {url}")
@@ -87,6 +87,52 @@ class VideoService:
 
         logger.info(f"Video downloaded successfully: {video_path}")
         return video_path
+
+    @staticmethod
+    async def split_video_into_segments(
+        video_path: Path,
+        segment_duration: float = 5400.0,
+    ) -> List[Tuple[Path, float, float]]:
+        """
+        Split a video into segments if it exceeds segment_duration.
+        Returns a list of (segment_path, start_time_offset, end_time_offset).
+        """
+        duration = VideoService._get_file_duration(video_path)
+        if not duration or duration <= segment_duration:
+            return [(video_path, 0.0, duration or 0.0)]
+
+        logger.info(f"Video duration ({duration}s) exceeds segment limit ({segment_duration}s). Splitting...")
+        
+        segments = []
+        num_segments = int(duration // segment_duration) + (1 if duration % segment_duration > 0 else 0)
+        
+        for i in range(num_segments):
+            start = i * segment_duration
+            end = min((i + 1) * segment_duration, duration)
+            segment_path = video_path.parent / f"{video_path.stem}_part{i+1}{video_path.suffix}"
+            
+            # Use ffmpeg -ss before -i for fast seeking, though it may be less precise
+            # For 90-min chunks, this is usually acceptable.
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-t", str(end - start),
+                "-i", str(video_path),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                str(segment_path)
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                segments.append((segment_path, start, end))
+                logger.info(f"Created segment {i+1}: {start}s to {end}s -> {segment_path.name}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to split segment {i+1}: {e.stderr.decode()}")
+                if i == 0:
+                    return [(video_path, 0.0, duration)]
+        
+        return segments
 
     @staticmethod
     async def get_video_title(url: str) -> str:
@@ -141,6 +187,7 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        webcam_box: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Create standalone video clips from segments with optional subtitles.
@@ -163,6 +210,7 @@ class VideoService:
             caption_template,
             output_format,
             add_subtitles,
+            webcam_box,
         )
 
         logger.info(f"Successfully created {len(clips_info)} clips")
@@ -278,38 +326,25 @@ class VideoService:
         output_format: str = "vertical",
         add_subtitles: bool = True,
         webcam_box: Optional[str] = None,
+        quality: str = "high",
         cached_transcript: Optional[str] = None,
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> Dict[str, Any]:
         """
-        Complete video processing pipeline.
-        Returns dict with segments and clips info.
-
-        progress_callback: Optional function to call with progress updates
-                          Signature: async def callback(progress: int, message: str, status: str)
+        Complete video processing pipeline supporting long videos and quality selection.
         """
         try:
-            # Step 1: Get video path (download or use existing)
             if should_cancel and await should_cancel():
                 raise Exception("Task cancelled")
 
+            # Step 1: Download video with quality selection
             if progress_callback:
-                await progress_callback(10, "Downloading video...", "processing")
+                await progress_callback(5, "Downloading video...", "processing")
 
             if source_type == "youtube":
-                video_info = await async_get_youtube_video_info(url, task_id=task_id)
-                if video_info:
-                    duration = video_info.get("duration", 0)
-                    if duration and duration > config.max_video_duration:
-                        mins = config.max_video_duration // 60
-                        raise Exception(
-                            f"Video is too long ({duration // 60} min). "
-                            f"Maximum allowed duration is {mins} minutes."
-                        )
-
-                video_path = await VideoService.download_video(url, task_id=task_id)
+                video_path = await VideoService.download_video(url, task_id=task_id, quality=quality)
                 if not video_path:
                     raise Exception("Failed to download video")
             else:
@@ -317,115 +352,92 @@ class VideoService:
                 if not video_path.exists():
                     raise Exception("Video file not found")
 
-            # Post-download duration guard (catches cases where preflight info was unavailable)
-            file_duration = VideoService._get_file_duration(video_path)
-            if file_duration and file_duration > config.max_video_duration:
-                mins = config.max_video_duration // 60
-                raise Exception(
-                    f"Video is too long ({int(file_duration) // 60} min). "
-                    f"Maximum allowed duration is {mins} minutes."
+            # Step 2: Split video into segments (90 mins each)
+            segments = await VideoService.split_video_into_segments(video_path)
+            num_segments = len(segments)
+            logger.info(f"Processing video in {num_segments} parts")
+
+            all_segments_json: List[Dict[str, Any]] = []
+            combined_transcript = []
+            summaries = []
+            key_topics_combined = set()
+
+            # Step 3: Loop through segments
+            for i, (seg_path, start_offset, end_offset) in enumerate(segments):
+                if should_cancel and await should_cancel():
+                    raise Exception("Task cancelled")
+
+                part_base_progress = 10 + (i / num_segments) * 80
+                part_label = f" (Part {i+1}/{num_segments})" if num_segments > 1 else ""
+
+                if progress_callback:
+                    await progress_callback(int(part_base_progress), f"Generating transcript{part_label}...", "processing")
+
+                # Transcription
+                seg_transcript = await VideoService.generate_transcript(
+                    seg_path, processing_mode=processing_mode
                 )
+                combined_transcript.append(seg_transcript)
 
-            # Step 2: Generate transcript
-            if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                if progress_callback:
+                    await progress_callback(int(part_base_progress + 5 / num_segments), f"Analyzing content{part_label}...", "processing")
 
-            if progress_callback:
-                await progress_callback(30, "Generating transcript...", "processing")
+                # AI Analysis
+                seg_analysis = await VideoService.analyze_transcript(seg_transcript)
+                if seg_analysis.summary:
+                    summaries.append(seg_analysis.summary)
+                if seg_analysis.key_topics:
+                    key_topics_combined.update(seg_analysis.key_topics)
 
-            transcript = cached_transcript
-            if not transcript:
-                transcript = await VideoService.generate_transcript(
-                    video_path, processing_mode=processing_mode
-                )
+                # Collect segments and adjust timestamps
+                for rel_seg in seg_analysis.most_relevant_segments:
+                    # rel_seg can be a dict or object depending on implementation
+                    s_time = rel_seg.get("start_time") if isinstance(rel_seg, dict) else rel_seg.start_time
+                    e_time = rel_seg.get("end_time") if isinstance(rel_seg, dict) else rel_seg.end_time
+                    text = rel_seg.get("text", "") if isinstance(rel_seg, dict) else rel_seg.text
+                    score = rel_seg.get("relevance_score", 0.0) if isinstance(rel_seg, dict) else rel_seg.relevance_score
+                    reason = rel_seg.get("reasoning", "") if isinstance(rel_seg, dict) else rel_seg.reasoning
 
-            # Step 3: AI analysis
-            if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                    abs_start = parse_timestamp_to_seconds(s_time) + start_offset
+                    abs_end = parse_timestamp_to_seconds(e_time) + start_offset
 
-            if progress_callback:
-                await progress_callback(
-                    50, "Analyzing content with AI...", "processing"
-                )
+                    def format_ts(s):
+                        return f"{int(s//60):02d}:{int(s%60):02d}"
 
-            relevant_parts = None
-            if cached_analysis_json:
-                try:
-                    cached_analysis = json.loads(cached_analysis_json)
-                    segments = cached_analysis.get("most_relevant_segments", [])
+                    all_segments_json.append({
+                        "start_time": format_ts(abs_start),
+                        "end_time": format_ts(abs_end),
+                        "text": text,
+                        "relevance_score": score,
+                        "reasoning": reason,
+                        "part": i + 1
+                    })
 
-                    class _SimpleResult:
-                        def __init__(self, payload: Dict[str, Any]):
-                            self.summary = payload.get("summary")
-                            self.key_topics = payload.get("key_topics")
-                            self.most_relevant_segments = payload.get(
-                                "most_relevant_segments", []
-                            )
-
-                    relevant_parts = _SimpleResult(
-                        {
-                            "summary": cached_analysis.get("summary"),
-                            "key_topics": cached_analysis.get("key_topics", []),
-                            "most_relevant_segments": segments,
-                        }
-                    )
-                except Exception:
-                    relevant_parts = None
-
-            if relevant_parts is None:
-                relevant_parts = await VideoService.analyze_transcript(transcript)
-
-            # Step 4: Create clips
-            if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
-
-            if progress_callback:
-                await progress_callback(70, "Creating video clips...", "processing")
-
-            raw_segments = relevant_parts.most_relevant_segments
-            segments_json: List[Dict[str, Any]] = []
-            for segment in raw_segments:
-                if isinstance(segment, dict):
-                    segments_json.append(
-                        {
-                            "start_time": segment.get("start_time"),
-                            "end_time": segment.get("end_time"),
-                            "text": segment.get("text", ""),
-                            "relevance_score": segment.get("relevance_score", 0.0),
-                            "reasoning": segment.get("reasoning", ""),
-                        }
-                    )
-                else:
-                    segments_json.append(
-                        {
-                            "start_time": segment.start_time,
-                            "end_time": segment.end_time,
-                            "text": segment.text,
-                            "relevance_score": segment.relevance_score,
-                            "reasoning": segment.reasoning,
-                        }
-                    )
-
+            # Fast mode clip limit
             if processing_mode == "fast":
-                segments_json = segments_json[: config.fast_mode_max_clips]
+                all_segments_json = all_segments_json[: config.fast_mode_max_clips]
+
+            # Consolidate results
+            final_transcript = "\n\n".join(combined_transcript)
+            final_summary = " ".join(summaries)
+            final_key_topics = list(key_topics_combined)
+
+            if progress_callback:
+                await progress_callback(95, "Finalizing analysis...", "processing")
 
             return {
-                "segments": segments_json,
-                "segments_to_render": segments_json,
+                "segments": all_segments_json,
+                "segments_to_render": all_segments_json,
                 "video_path": str(video_path),
                 "clips": [],
-                "summary": relevant_parts.summary if relevant_parts else None,
-                "key_topics": relevant_parts.key_topics if relevant_parts else None,
-                "transcript": transcript,
-                "analysis_json": json.dumps(
-                    {
-                        "summary": relevant_parts.summary if relevant_parts else None,
-                        "key_topics": relevant_parts.key_topics
-                        if relevant_parts
-                        else [],
-                        "most_relevant_segments": segments_json,
-                    }
-                ),
+                "summary": final_summary,
+                "key_topics": final_key_topics,
+                "transcript": final_transcript,
+                "analysis_json": json.dumps({
+                    "summary": final_summary,
+                    "key_topics": final_key_topics,
+                    "most_relevant_segments": all_segments_json,
+                }),
             }
 
         except Exception as e:

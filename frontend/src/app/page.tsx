@@ -17,7 +17,7 @@ import { track } from "@/lib/datafast";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings } from "lucide-react";
+import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings, Zap } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import LandingPage from "@/components/landing-page";
 import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
@@ -124,11 +124,13 @@ export default function Home() {
   const [webcamBox, setWebcamBox] = useState(""); // Format: x,y,w,h
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isFetchingPreview, setIsFetchingPreview] = useState(false);
 
   // Latest task state
   const [latestTask, setLatestTask] = useState<LatestTask | null>(null);
   const [isLoadingLatest, setIsLoadingLatest] = useState(false);
   const [billingSummary, setBillingSummary] = useState<BillingSummary | null>(null);
+  const [downloadQuality, setDownloadQuality] = useState<"high" | "medium" | "low">("high");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
   const taskApiUrl = "/api/tasks";
@@ -317,6 +319,38 @@ export default function Home() {
     });
   };
 
+  const fetchYoutubePreview = async () => {
+    if (!url.trim()) return;
+    
+    try {
+      setIsFetchingPreview(true);
+      setError(null);
+      
+      const response = await fetch(`${apiUrl}/tasks/youtube-preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: url.trim() }),
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to fetch preview frame from YouTube.");
+      }
+      
+      const data = await response.json();
+      if (data.frame) {
+        setPreviewUrl(data.frame);
+        setIsCropModalOpen(true);
+      }
+    } catch (err) {
+      console.error("Error fetching preview:", err);
+      setError("Could not fetch a preview frame for this YouTube video. Please try again or type coordinates manually.");
+    } finally {
+      setIsFetchingPreview(false);
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
     fileRef.current = file;
@@ -496,7 +530,8 @@ export default function Home() {
           processing_mode: "fast",
           output_format: outputFormat,
           add_subtitles: addSubtitles,
-          webcam_box: outputFormat === "gaming" ? webcamBox : null
+          webcam_box: outputFormat === "gaming" ? webcamBox : null,
+          quality: downloadQuality
         }),
       });
 
@@ -992,6 +1027,43 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Download Quality */}
+                  <div className="space-y-2">
+                    <label className="text-sm text-stone-600">
+                      Download Quality
+                    </label>
+                    <div className="flex items-center gap-3 p-3 border rounded-lg bg-stone-50">
+                      <Zap className="w-4 h-4 text-orange-500 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <Select value={downloadQuality} onValueChange={(val) => setDownloadQuality(val as any)} disabled={isLoading}>
+                          <SelectTrigger className="w-full bg-transparent border-none p-0 h-auto focus:ring-0">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="high">
+                              <div className="flex flex-col">
+                                <span className="font-medium">High (1080p+)</span>
+                                <span className="text-xs text-stone-500">Highest available resolution</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="medium">
+                              <div className="flex flex-col">
+                                <span className="font-medium">Medium (720p)</span>
+                                <span className="text-xs text-stone-500">Good balance of quality and speed</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="low">
+                              <div className="flex flex-col">
+                                <span className="font-medium">Low (480p)</span>
+                                <span className="text-xs text-stone-500">Fastest processing time</span>
+                              </div>
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </div>
                   
                   {outputFormat === "gaming" && (
                     <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -1028,6 +1100,34 @@ export default function Home() {
                             webcamBox={webcamBox}
                             outputFormat={outputFormat}
                           />
+                        </div>
+                      )}
+
+                      {sourceType === "youtube" && url.trim() && (
+                        <div className="space-y-4">
+                          <Button 
+                            type="button" 
+                            variant="outline" 
+                            size="sm" 
+                            className="w-full text-xs h-8 border-dashed border-stone-300 hover:border-stone-400 hover:bg-stone-50"
+                            onClick={fetchYoutubePreview}
+                            disabled={isFetchingPreview || isLoading}
+                          >
+                            {isFetchingPreview ? (
+                              <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                            ) : (
+                              <Move className="w-3 h-3 mr-2" />
+                            )}
+                            {isFetchingPreview ? "Fetching Preview..." : "Select Area Interactively"}
+                          </Button>
+
+                          {previewUrl && (
+                            <CompositionPreview 
+                              previewUrl={previewUrl}
+                              webcamBox={webcamBox}
+                              outputFormat={outputFormat}
+                            />
+                          )}
                         </div>
                       )}
 

@@ -27,6 +27,7 @@ async def process_video_task(
     output_format: str = "vertical",
     add_subtitles: bool = True,
     webcam_box: Optional[str] = None,
+    quality: str = "high",
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -87,6 +88,7 @@ async def process_video_task(
                 output_format=output_format,
                 add_subtitles=add_subtitles,
                 webcam_box=webcam_box,
+                quality=quality,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

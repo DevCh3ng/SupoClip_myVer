@@ -82,6 +82,7 @@ class TaskService:
         include_broll: bool = False,
         processing_mode: str = "fast",
         webcam_box: Optional[str] = None,
+        quality: str = "high",
     ) -> str:
         """
         Create a new task with associated source.
@@ -137,7 +138,8 @@ class TaskService:
         output_format: str = "vertical",
         add_subtitles: bool = True,
         webcam_box: Optional[str] = None,
-        progress_callback: Optional[Callable] = None,
+        quality: str = "high",
+        progress_callback: Optional[Callable[[int, str, str], Any]] = None,
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:

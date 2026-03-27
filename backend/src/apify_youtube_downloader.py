@@ -31,7 +31,14 @@ class ApifyDownloadError(RuntimeError):
 
 
 def normalize_apify_quality(value: Optional[str]) -> str:
-    normalized = (value or "").strip()
+    normalized = (value or "").strip().lower()
+    mapping = {
+        "low": "480",
+        "medium": "720",
+        "high": "1080"
+    }
+    if normalized in mapping:
+        return mapping[normalized]
     if normalized in ALLOWED_APIFY_QUALITIES:
         return normalized
     return "1080"

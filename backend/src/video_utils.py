@@ -356,7 +356,13 @@ def format_transcript_for_analysis(transcript) -> List[str]:
     utterances = getattr(transcript, "utterances", None) or []
     if utterances:
         formatted_lines = []
+        last_end_ms = 0
         for utterance in utterances:
+            # Detect significant gaps (silence) between segments (> 3 seconds)
+            if last_end_ms > 0 and (utterance.start - last_end_ms) > 3000:
+                gap_secs = (utterance.start - last_end_ms) // 1000
+                formatted_lines.append(f"--- SILENCE ({gap_secs}s) ---")
+
             start_time = format_ms_to_timestamp(utterance.start)
             end_time = format_ms_to_timestamp(utterance.end)
             speaker = getattr(utterance, "speaker", None)
@@ -364,6 +370,7 @@ def format_transcript_for_analysis(transcript) -> List[str]:
             formatted_lines.append(
                 f"[{start_time} - {end_time}] {speaker_prefix}{utterance.text}"
             )
+            last_end_ms = utterance.end
         return formatted_lines
 
     formatted_lines = []
@@ -1654,6 +1661,7 @@ def create_clips_from_segments(
     caption_template: str = "default",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    webcam_box: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Create optimized video clips from segments with template support."""
     logger.info(
@@ -1698,6 +1706,7 @@ def create_clips_from_segments(
                 font_color,
                 caption_template,
                 output_format,
+                webcam_box,
             )
 
             if success:
@@ -1853,6 +1862,7 @@ def create_clips_with_transitions(
     caption_template: str = "default",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    webcam_box: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Create standalone video clips without inter-clip transitions.
 
@@ -1874,6 +1884,7 @@ def create_clips_with_transitions(
         caption_template,
         output_format,
         add_subtitles,
+        webcam_box,
     )
 
 
