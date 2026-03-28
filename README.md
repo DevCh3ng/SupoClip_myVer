@@ -52,71 +52,50 @@ SupoClip provides the same core functionality without the financial burden:
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- An AssemblyAI API key (for transcription) - [Get one here](https://www.assemblyai.com/)
-- An LLM provider for AI analysis - OpenAI, Google, Anthropic, or Ollama
+- **Docker & Docker Compose**
+- **Nvidia GPU** (Highly recommended for high-speed WhisperX transcription and NVENC video rendering)
+- **An LLM provider** for video analysis (Google Gemini, OpenAI, Anthropic, or local Ollama)
 
 ### 1. Clone and Configure
 
 ```bash
-git clone https://github.com/your-username/supoclip.git
-cd supoclip
+git clone https://github.com/DevCh3ng/SupoClip_myVer.git
+cd SupoClip_myVer
 ```
 
 Create a `.env` file in the root directory:
 
 ```env
-# Required: Video transcription
-ASSEMBLY_AI_API_KEY=your_assemblyai_api_key
-
-# Required: Choose ONE LLM provider and set its API key
-# Option A: Google Gemini (recommended - fast & cost-effective)
+# Required: Choose ONE LLM provider for intelligence
+# Option A: Google Gemini (Recommended - fast & cost-effective)
 LLM=google-gla:gemini-3-flash-preview
 GOOGLE_API_KEY=your_google_api_key
 
-# Option B: OpenAI GPT-5.2 (best reasoning)
-# LLM=openai:gpt-5.2
+# Option B: OpenAI
+# LLM=openai:gpt-4o
 # OPENAI_API_KEY=your_openai_api_key
 
-# Option C: Anthropic Claude
-# LLM=anthropic:claude-4-sonnet
-# ANTHROPIC_API_KEY=your_anthropic_api_key
+# --- Transcription is LOCAL by default using WhisperX ---
+# (Optionally set ASSEMBLY_AI_API_KEY if you want to fall back to cloud API)
+# ASSEMBLY_AI_API_KEY=your_assemblyai_api_key
 
-# Option D: Ollama (local/self-hosted)
-# LLM=ollama:gpt-oss:20b
-# OLLAMA_BASE_URL=http://localhost:11434/v1
-# OLLAMA_API_KEY=your_ollama_api_key  # Optional (Ollama Cloud)
-
-# Optional: Auth secret (change in production)
-BETTER_AUTH_SECRET=change_this_in_production
-
-# Optional: DataFast analytics
-# Track your deployed domain in DataFast
-# NEXT_PUBLIC_DATAFAST_WEBSITE_ID=dfid_xxxxx
-# NEXT_PUBLIC_DATAFAST_DOMAIN=your-domain.com
-# NEXT_PUBLIC_DATAFAST_ALLOW_LOCALHOST=false
-
-# Optional: Resend for waitlist confirmation emails
-# RESEND_API_KEY=your_resend_api_key
-
-# Optional: YouTube metadata provider
-# `yt_dlp` preserves the existing metadata behavior
-# `youtube_data_api` uses the official API first, then falls back to yt-dlp
-# YOUTUBE_METADATA_PROVIDER=yt_dlp
-# YOUTUBE_DATA_API_KEY=your_youtube_data_api_key
+# Optional: Set your preferred WhisperX model (default: base.en)
+WHISPER_MODEL_SIZE=base.en
 ```
 
 ### 2. Start the Services
 
+Build and launch the full stack:
+
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
 This starts:
 - **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:8000 (docs at /docs)
-- **PostgreSQL**: localhost:5432
-- **Redis**: localhost:6379
+- **PostgreSQL**: Internal (managed volume)
+- **Redis**: Internal (managed volume)
 
 ### 3. Wait for Initialization
 
