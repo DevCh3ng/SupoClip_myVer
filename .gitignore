@@ -1,9 +1,56 @@
-.env.local
-.DS_Store
-__pycache__
-*.egg-info
-logs/
-temp/
+# --- Secrets & Environment ---
 .env
-*.m4a
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# --- OS & IDE ---
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+*.transcript_cache.json
+backend/raw_whisper.json
+
+# --- Node.js ---
+node_modules/
+.next/
+out/
+build/
+dist/
+.npm/
+*-debug.log*
+*-error.log*
+.pnpm-debug.log*
+
+# --- Docker & Database ---
+pgdata/
+dump.rdb
+.docker-compose.local.yml
+
+# --- Project Specific Media & Artifacts ---
+backend/uploads/
+backend/clips/
+backend/sample_*.mp4
+backend/sample_*.txt
+backend/test_whisper.py
+whisper.cpp/
+
+# Next.js specific
 frontend/e2e/.seed.json
+frontend/next-env.d.ts
+frontend/src/generated/prisma

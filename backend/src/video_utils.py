@@ -180,74 +180,78 @@ class VideoProcessor:
         return settings.get(target_quality, settings["high"])
 
 
-def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
-    """Get transcript using whisper.cpp with word-level timing for precise subtitles."""
+def get_video_transcript(video_path: Path, speech_model: str = "base.en") -> str:
+    """Get transcript using whisperx with perfect word-level timing via Wav2Vec2 alignment."""
     logger.info(f"Getting offline transcript for: {video_path}")
+    
+    import whisperx
+    import gc
+    import torch
 
-    # Use a temporary wav file for whisper.cpp
-    wav_path = video_path.with_suffix(".whisper.wav")
-    json_out_prefix = video_path.with_suffix(".whisper")
-    json_path = Path(f"{json_out_prefix}.json")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    batch_size = 16 if device == "cuda" else 8
+    compute_type = "float16" if device == "cuda" else "int8"
+
+    # Map internal model names (e.g. from AssemblyAI legacy) to WhisperX standard sizes
+    model_map = {
+        "nano": "tiny.en",
+        "base": "base.en",
+        "small": "small.en",
+        "medium": "medium.en"
+    }
+    actual_model = model_map.get(speech_model.lower(), speech_model)
 
     try:
-        # Extract 16kHz mono audio via ffmpeg
-        logger.info("Extracting audio for transcription...")
-        subprocess.run([
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav_path)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"Loading {actual_model} whisperx model on {device}")
+        # 1. Load audio and transcribe
+        audio = whisperx.load_audio(str(video_path))
+        model = whisperx.load_model(actual_model, device, compute_type=compute_type)
+        result = model.transcribe(audio, batch_size=batch_size)
 
-        # Map 'speech_model' directly to the downloaded model or base.en
-        model_name = "ggml-base.en.bin"  # Default fallback
-        # In the future, this can map "fast" -> "ggml-nano.en.bin", etc.
-        
-        whisper_bin = "/app/whisper.cpp/build/bin/whisper-cli"
-        model_bin = f"/app/whisper.cpp/models/{model_name}"
-        
-        logger.info(f"Starting offline whisper.cpp transcription using {model_name}")
-        subprocess.run([
-            whisper_bin,
-            "-m", model_bin,
-            "-f", str(wav_path),
-            "-ojf", "-sow",
-            "-of", str(json_out_prefix)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Free GPU memory from original model
+        del model
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
-        if not json_path.exists():
-            raise Exception("whisper.cpp did not output the expected JSON file.")
+        logger.info("Aligning transcript with Wav2Vec2...")
+        # 2. Align whisper output
+        model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
+        result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
 
-        with open(json_path, "r") as f:
-            whisper_data = json.load(f)
+        # Free alignment model
+        del model_a
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
+        # 3. Parse segments to MockTranscript format
         mock_utterances = []
         all_mock_words = []
         full_text_list = []
 
-        segments = whisper_data.get("transcription", [])
-        for segment in segments:
-            seg_start = int(segment["offsets"]["from"])
-            seg_end = int(segment["offsets"]["to"])
+        for segment in result["segments"]:
+            if "start" not in segment or "end" not in segment:
+                continue
+
+            seg_start = int(segment["start"] * 1000)
+            seg_end = int(segment["end"] * 1000)
             seg_text = segment.get("text", "").strip()
             
-            # Words
             segment_words = []
-            for token in segment.get("tokens", []):
-                t_text = token.get("text", "")
-                # Skip special whisper tokens like [_BEG_], [_TT_550]
-                if t_text.startswith("[_") and t_text.endswith("_]"):
+            for word in segment.get("words", []):
+                if "start" not in word or "end" not in word:
+                    continue
+                    
+                w_text = word["word"].strip()
+                if not w_text:
                     continue
 
-                w_start = int(token["offsets"]["from"])
-                w_end = int(token["offsets"]["to"])
-                w_conf = float(token.get("p", 1.0))
-                
-                # Cleanup whisper word output (remove leading/trailing spaces for alignment)
-                # But we keep original text slightly cleaned so MoviePy doesn't crash on spaces
-                clean_t_text = t_text.strip()
-                if not clean_t_text:
-                    continue
+                w_start = int(word["start"] * 1000)
+                w_end = int(word["end"] * 1000)
+                w_conf = float(word.get("score", 1.0))
 
-                w = MockWord(clean_t_text, w_start, w_end, w_conf)
+                w = MockWord(w_text, w_start, w_end, w_conf)
                 segment_words.append(w)
                 all_mock_words.append(w)
 
@@ -263,26 +267,15 @@ def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
         )
 
         formatted_lines = format_transcript_for_analysis(transcript)
-
-        # Cache the raw transcript for subtitle generation
         cache_transcript_data(video_path, transcript)
 
-        result = "\n".join(formatted_lines)
-        logger.info(
-            f"Transcript formatted: {len(formatted_lines)} segments, {len(result)} chars"
-        )
-        return result
+        output = "\n".join(formatted_lines)
+        logger.info(f"Transcript formatted: {len(formatted_lines)} segments, {len(output)} chars")
+        return output
 
     except Exception as e:
-        logger.error(f"Error in transcription: {e}")
+        logger.error(f"Error in whisperx transcription: {e}")
         raise
-        
-    finally:
-        # Cleanup temp files
-        if wav_path.exists():
-            wav_path.unlink()
-        if json_path.exists():
-            json_path.unlink()
 
 
 def cache_transcript_data(video_path: Path, transcript) -> None:
@@ -1007,22 +1000,36 @@ def parse_timestamp_to_seconds(timestamp_str: str) -> float:
 def get_words_in_range(
     transcript_data: Dict, clip_start: float, clip_end: float
 ) -> List[Dict]:
-    """Extract words that fall within a clip timerange."""
+    """Extract words that fall within a clip timerange, filtering out hallucinations."""
     if not transcript_data or not transcript_data.get("words"):
         return []
 
     clip_start_ms = int(clip_start * 1000)
     clip_end_ms = int(clip_end * 1000)
+    clip_duration_ms = clip_end_ms - clip_start_ms
+
+    # Thresholds to reject hallucination tokens
+    MIN_CONFIDENCE = 0.3
+    MAX_WORD_DURATION_MS = 10_000  # 10 seconds — no real word lasts longer
 
     relevant_words = []
     for word_data in transcript_data["words"]:
         word_start = word_data["start"]
         word_end = word_data["end"]
+        confidence = word_data.get("confidence", 1.0)
+
+        # Drop low-confidence hallucination tokens
+        if confidence < MIN_CONFIDENCE:
+            continue
+
+        # Drop tokens with unreasonably long durations
+        if (word_end - word_start) > MAX_WORD_DURATION_MS:
+            continue
 
         if word_start < clip_end_ms and word_end > clip_start_ms:
             relative_start = max(0, (word_start - clip_start_ms) / 1000.0)
             relative_end = min(
-                (clip_end_ms - clip_start_ms) / 1000.0,
+                clip_duration_ms / 1000.0,
                 (word_end - clip_start_ms) / 1000.0,
             )
 
@@ -1032,7 +1039,7 @@ def get_words_in_range(
                         "text": word_data["text"],
                         "start": relative_start,
                         "end": relative_end,
-                        "confidence": word_data.get("confidence", 1.0),
+                        "confidence": confidence,
                     }
                 )
 
@@ -1126,6 +1133,8 @@ def create_static_subtitles(
     font_family: str,
 ) -> List[TextClip]:
     """Create standard static subtitles (original behavior)."""
+    relevant_words = preprocess_words(relevant_words)
+
     subtitle_clips = []
     processor = VideoProcessor(
         font_family, template["font_size"], template["font_color"]
@@ -1135,9 +1144,10 @@ def create_static_subtitles(
     position_y = template.get("position_y", 0.75)
     max_text_width = get_subtitle_max_width(video_width)
 
-    words_per_subtitle = 3
-    for i in range(0, len(relevant_words), words_per_subtitle):
-        word_group = relevant_words[i : i + words_per_subtitle]
+    words_per_subtitle = 1
+    word_groups = group_words_by_time_and_count(relevant_words, words_per_subtitle)
+
+    for word_group in word_groups:
         if not word_group:
             continue
 
@@ -1145,8 +1155,11 @@ def create_static_subtitles(
         segment_end = word_group[-1]["end"]
         segment_duration = segment_end - segment_start
 
-        if segment_duration < 0.1:
+        if segment_duration <= 0:
             continue
+
+        # Cap length to 0.6 seconds so Whisper base doesn't linger across long silences
+        segment_duration = min(segment_duration, 0.6)
 
         text = " ".join(word["text"] for word in word_group)
 
@@ -1187,6 +1200,69 @@ def create_static_subtitles(
     return subtitle_clips
 
 
+def preprocess_words(words: List[Dict]) -> List[Dict]:
+    """Strip punctuation, filter hallucinations, and merge stray single-char tokens."""
+    STRIP_CHARS = set(".,?!;:\"'…-—")
+    MIN_CONFIDENCE = 0.3
+    MAX_WORD_DURATION_S = 10.0  # seconds
+
+    # First pass: strip punctuation and drop empty / hallucination tokens
+    cleaned = []
+    for w in words:
+        # Drop low-confidence hallucination tokens
+        if w.get("confidence", 1.0) < MIN_CONFIDENCE:
+            continue
+        # Drop tokens with unreasonably long durations
+        if (w["end"] - w["start"]) > MAX_WORD_DURATION_S:
+            continue
+        text = w["text"]
+        text = "".join(ch for ch in text if ch not in STRIP_CHARS).strip()
+        if not text:
+            continue
+        cleaned.append({**w, "text": text})
+
+    # Second pass: merge single-char tokens (except 'a' / 'i') with previous
+    merged: List[Dict] = []
+    for w in cleaned:
+        text = w["text"]
+        is_stray = len(text) == 1 and text.lower() not in ("a", "i")
+        if is_stray and merged:
+            # Append the character to the previous word's text; extend its end time
+            prev = merged[-1]
+            merged[-1] = {**prev, "text": prev["text"] + text, "end": w["end"]}
+        else:
+            merged.append(w)
+
+    return merged
+
+
+def group_words_by_time_and_count(
+    words: List[Dict], max_words: int = 3, max_gap_seconds: float = 1.5
+) -> List[List[Dict]]:
+    """Group words into subtitle chunks based on word count AND time gaps."""
+    groups = []
+    current_group = []
+
+    for word in words:
+        if not current_group:
+            current_group.append(word)
+            continue
+
+        last_word_end = current_group[-1]["end"]
+        gap = word["start"] - last_word_end
+
+        if len(current_group) < max_words and gap < max_gap_seconds:
+            current_group.append(word)
+        else:
+            groups.append(current_group)
+            current_group = [word]
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
 def create_karaoke_subtitles(
     relevant_words: List[Dict],
     video_width: int,
@@ -1195,6 +1271,8 @@ def create_karaoke_subtitles(
     font_family: str,
 ) -> List[TextClip]:
     """Create karaoke-style subtitles with word-by-word highlighting."""
+    relevant_words = preprocess_words(relevant_words)
+
     subtitle_clips = []
     processor = VideoProcessor(
         font_family, template["font_size"], template["font_color"]
@@ -1207,7 +1285,7 @@ def create_karaoke_subtitles(
     max_text_width = get_subtitle_max_width(video_width)
     horizontal_padding = max(40, int(video_width * 0.06))
 
-    words_per_group = 3
+    words_per_group = 1
 
     def measure_word_group_width(word_group: List[Dict], font_size: int) -> List[int]:
         widths: List[int] = []
@@ -1225,8 +1303,9 @@ def create_karaoke_subtitles(
             temp_clip.close()
         return widths
 
-    for group_idx in range(0, len(relevant_words), words_per_group):
-        word_group = relevant_words[group_idx : group_idx + words_per_group]
+    word_groups = group_words_by_time_and_count(relevant_words, words_per_group)
+
+    for word_group in word_groups:
         if not word_group:
             continue
 
@@ -1320,6 +1399,8 @@ def create_pop_subtitles(
     font_family: str,
 ) -> List[TextClip]:
     """Create pop-style subtitles where each word pops in."""
+    relevant_words = preprocess_words(relevant_words)
+
     subtitle_clips = []
     processor = VideoProcessor(
         font_family, template["font_size"], template["font_color"]
@@ -1329,10 +1410,11 @@ def create_pop_subtitles(
     position_y = template.get("position_y", 0.75)
     max_text_width = get_subtitle_max_width(video_width)
 
-    words_per_group = 3
+    words_per_group = 1
 
-    for group_idx in range(0, len(relevant_words), words_per_group):
-        word_group = relevant_words[group_idx : group_idx + words_per_group]
+    word_groups = group_words_by_time_and_count(relevant_words, words_per_group)
+
+    for word_group in word_groups:
         if not word_group:
             continue
 
@@ -1388,6 +1470,8 @@ def create_fade_subtitles(
     font_family: str,
 ) -> List[TextClip]:
     """Create fade-style subtitles with smooth transitions."""
+    relevant_words = preprocess_words(relevant_words)
+
     subtitle_clips = []
     processor = VideoProcessor(
         font_family, template["font_size"], template["font_color"]
@@ -1399,10 +1483,11 @@ def create_fade_subtitles(
     background_color = template.get("background_color", "#00000080")
     max_text_width = get_subtitle_max_width(video_width)
 
-    words_per_group = 4
+    words_per_group = 1
 
-    for group_idx in range(0, len(relevant_words), words_per_group):
-        word_group = relevant_words[group_idx : group_idx + words_per_group]
+    word_groups = group_words_by_time_and_count(relevant_words, words_per_group)
+
+    for word_group in word_groups:
         if not word_group:
             continue
 

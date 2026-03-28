@@ -71,7 +71,6 @@ services:
       - IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - LD_LIBRARY_PATH=/app/whisper.cpp/build/src:/app/whisper.cpp/build/ggml/src
       - DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@postgres:5432/supoclip
       - TEMP_DIR=/app/uploads
       - REDIS_HOST=redis
@@ -140,7 +139,6 @@ services:
       - IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - LD_LIBRARY_PATH=/app/whisper.cpp/build/src:/app/whisper.cpp/build/ggml/src
       - DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@postgres:5432/supoclip
       - TEMP_DIR=/app/uploads
       - REDIS_HOST=redis
