@@ -57,4 +57,4 @@ frontend/e2e/.seed.json
 frontend/next-env.d.ts
 frontend/src/generated/prisma
 *.pt
-
+.gitignore

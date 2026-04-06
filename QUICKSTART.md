@@ -4,7 +4,7 @@ Run SupoClip with Docker in just one command!
 
 ## Prerequisites
 
-1. **Docker Desktop** installed and running
+1. **Docker** (with Docker Compose) installed and running
 2. **API Keys** (get these from the providers):
    - [AssemblyAI API Key](https://www.assemblyai.com/) (required for transcription)
    - At least one AI provider:
@@ -12,6 +12,59 @@ Run SupoClip with Docker in just one command!
       - [Google AI API Key](https://makersuite.google.com/app/apikey)
       - [Anthropic API Key](https://console.anthropic.com/)
       - [Ollama](https://ollama.com/) (local/self-hosted, no API key required for local)
+
+## GPU Setup (Optional but Recommended)
+
+SupoClip uses GPU acceleration for faster video rendering (NVENC) and AI-based webcam detection. Without a GPU it falls back to CPU automatically — everything still works, just slower.
+
+### Requirements
+- **Nvidia GPU** (Kepler/2013 or newer for NVENC)
+- **Driver version ≥ 530** (check with `nvidia-smi`)
+- **nvidia-container-toolkit** (to pass the GPU into Docker)
+
+### Install nvidia-container-toolkit (Linux)
+
+```bash
+# Add Nvidia container toolkit repo
+distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+sudo apt update && sudo apt install -y nvidia-container-toolkit
+
+# Wire it to Docker
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+### Verify GPU works in Docker
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi
+```
+
+If that prints your GPU details, GPU acceleration is ready. The `docker-compose.yml` worker service already has the `deploy: resources: reservations` block configured.
+
+### No GPU / CPU-only mode
+
+Simply remove or comment out the `deploy:` block in `docker-compose.yml` under the `worker` service:
+
+```yaml
+# worker:
+#   deploy:
+#     resources:
+#       reservations:
+#         devices:
+#           - driver: nvidia
+#             count: 1
+#             capabilities: [gpu]
+```
+
+The worker will automatically use CPU (`libx264`) for encoding and CPU-based face detection.
+
 
 ## Quick Start (Single Command)
 
