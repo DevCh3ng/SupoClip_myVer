@@ -49,8 +49,12 @@ backend/sample_*.mp4
 backend/sample_*.txt
 backend/test_whisper.py
 whisper.cpp/
+testfiles/
+webcam_tracker.py
 
 # Next.js specific
 frontend/e2e/.seed.json
 frontend/next-env.d.ts
 frontend/src/generated/prisma
+*.pt
+

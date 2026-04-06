@@ -20,6 +20,7 @@ from ..video_utils import (
     create_clips_with_transitions,
     create_optimized_clip,
     parse_timestamp_to_seconds,
+    detect_webcam_region,
 )
 from ..ai import get_most_relevant_parts_by_transcript
 from ..config import Config
@@ -351,6 +352,20 @@ class VideoService:
                 video_path = VideoService.resolve_local_video_path(url)
                 if not video_path.exists():
                     raise Exception("Video file not found")
+
+            # Step 1.5: Auto-detect webcam region for gaming layout if not provided
+            if output_format == "gaming" and not webcam_box:
+                if progress_callback:
+                    await progress_callback(7, "Detecting webcam region (GPU)...", "processing")
+                
+                try:
+                    # Run robust multi-frame detection in a thread
+                    detected_box = await run_in_thread(detect_webcam_region, video_path)
+                    if detected_box:
+                        webcam_box = detected_box
+                        logger.info(f"Auto-detected webcam box: {webcam_box}")
+                except Exception as e:
+                    logger.warning(f"Auto-webcam detection failed: {e}")
 
             # Step 2: Split video into segments (90 mins each)
             segments = await VideoService.split_video_into_segments(video_path)

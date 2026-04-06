@@ -13,6 +13,20 @@ import json
 
 import cv2
 try:
+    import face_recognition
+    import dlib
+    from ultralytics import YOLO
+    ML_LIBS_AVAILABLE = True
+except ImportError:
+    ML_LIBS_AVAILABLE = False
+try:
+    import face_recognition
+    import dlib
+    from ultralytics import YOLO
+    ML_LIBS_AVAILABLE = True
+except ImportError:
+    ML_LIBS_AVAILABLE = False
+try:
     from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip, ColorClip
     from moviepy.video.fx.all import fadein, fadeout
     # Create aliases for v2-style names if needed
@@ -107,16 +121,26 @@ class VideoProcessor:
         self.font_path = str(resolved_font) if resolved_font else ""
 
     def _check_nvenc_available(self) -> bool:
-        """Dynamically check if FFmpeg has nvenc compiled in and working."""
+        """Dynamically check if NVENC actually works at runtime (not just compiled in)."""
         try:
-            # -encoders output contains 'h264_nvenc' if the encoder is compiled in
             result = subprocess.run(
-                ["ffmpeg", "-encoders"], 
-                capture_output=True, 
-                text=True, 
-                check=True
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "color=c=black:size=32x32:rate=1",
+                    "-t", "0.1",
+                    "-vcodec", "h264_nvenc",
+                    "-f", "null", "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-            return "h264_nvenc" in result.stdout
+            if result.returncode == 0:
+                return True
+            # NVENC compiled in but driver too old / not available
+            if "libnvidia-encode" in result.stderr or "nvenc" in result.stderr.lower():
+                logger.warning("NVENC encoder is compiled in but failed at runtime (driver too old or unavailable). Falling back to libx264.")
+            return False
         except Exception:
             return False
 
@@ -565,9 +589,11 @@ def detect_gaming_layout(
     video_clip: VideoFileClip, start_time: float, end_time: float
 ) -> Optional[Tuple[int, int, int, int]]:
     """
-    Detect if there's a small webcam in a corner using improved averaging and outlier filtering.
+    Detect if there's a small webcam in a corner.
     Returns (x, y, w, h) of the webcam if found, else None.
     """
+    # Prefer robust multi-frame detection if available in the future, 
+    # but for now enhance the existing logic with better face detection.
     face_centers = detect_faces_in_clip(video_clip, start_time, end_time)
     if not face_centers:
         return None
@@ -575,25 +601,27 @@ def detect_gaming_layout(
     frame_w, frame_h = video_clip.size
     frame_area = frame_w * frame_h
 
-    # 1. Filter out outliers to avoid posters/rugs from biasing the average
+    # 1. Filter out outliers
     face_centers = filter_face_outliers(face_centers)
     if not face_centers:
         return None
 
-    # 2. Extract components
-    areas = [f[2] for f in face_centers]
+    # 2. Extract components (x, y, w, h, confidence)
+    # Note: detect_faces_in_clip returns x,y,w,area,conf or similar depending on version
+    # Actually it returns (x, y, w, h, confidence) or (x, y, area, confidence)
+    # Looking at detect_faces_in_clip line 832: (x, y, w, h, confidence)
     
-    # Check if the "average" face is small enough to be a webcam (< 15% of frame)
+    areas = [f[2]*f[3] if len(f) >= 4 else f[2] for f in face_centers]
+    
     avg_area = sum(areas) / len(areas)
-    if avg_area / frame_area < 0.15:
-        # Determine the average center
+    if avg_area / frame_area < 0.20: # Slightly more lenient
         avg_x = sum(f[0] for f in face_centers) / len(face_centers)
         avg_y = sum(f[1] for f in face_centers) / len(face_centers)
 
-        # Calculate crop size (expanding face box to capture webcam frame)
-        side = int(np.sqrt(avg_area) * 2.5)
+        # Robust expansion: Use the edge detection logic if we want, 
+        # but for now just use a consistent 2.5x expansion of the face
+        side = int(np.sqrt(avg_area) * 2.8)
         
-        # Ensure it's even for MoviePy
         x = round_to_even(max(0, int(avg_x - side // 2)))
         y = round_to_even(max(0, int(avg_y - side // 2)))
         w = round_to_even(min(side, frame_w - x))
@@ -602,6 +630,113 @@ def detect_gaming_layout(
         return (x, y, w, h)
 
     return None
+
+
+def detect_webcam_region(video_path: Path, max_scan_seconds: float = 180.0) -> Optional[str]:
+    """
+    Robustly detect a webcam PiP region by scanning the start of the video.
+    Uses GPU-accelerated face detection and identity consensus.
+    Returns "x,y,w,h" string or None.
+    """
+    if not ML_LIBS_AVAILABLE:
+        logger.warning("ML libraries not available for robust webcam detection")
+        return None
+
+    try:
+        video = VideoFileClip(str(video_path))
+        duration = min(video.duration, max_scan_seconds)
+        
+        # Sample frames every 15 seconds
+        sample_times = np.linspace(0, duration, num=min(12, int(duration/10)+1))
+        
+        all_detections = []
+        encodings = []
+        
+        device = "cnn" if dlib.DLIB_USE_CUDA else "hog"
+        logger.info(f"Scanning for webcam region using {device} on {len(sample_times)} frames...")
+
+        for t in sample_times:
+            frame = video.get_frame(t)
+            # Use small frame for speed
+            small = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
+            rgb_small = small # MoviePy is already RGB
+            
+            locs = face_recognition.face_locations(rgb_small, number_of_times_to_upsample=1 if device=="cnn" else 0, model=device)
+            if locs:
+                # We also want encodings to ensure it's the same person (the streamer)
+                # But encodings on every frame is slow, so we only do it if we find faces
+                frame_encs = face_recognition.face_encodings(rgb_small, locs)
+                for i, loc in enumerate(locs):
+                    top, right, bottom, left = loc
+                    # Scale back
+                    f_box = [left*2, top*2, (right-left)*2, (bottom-top)*2]
+                    all_detections.append({
+                        "time": t,
+                        "box": f_box,
+                        "encoding": frame_encs[i]
+                    })
+
+        if not all_detections:
+            video.close()
+            return None
+
+        # Identity Clustering (Simple: Match first frequent person)
+        if len(all_detections) > 1:
+            clusters = []
+            for det in all_detections:
+                found = False
+                for cluster in clusters:
+                    match = face_recognition.compare_faces([cluster["encoding"]], det["encoding"], tolerance=0.6)[0]
+                    if match:
+                        cluster["boxes"].append(det["box"])
+                        found = True
+                        break
+                if not found:
+                    clusters.append({"encoding": det["encoding"], "boxes": [det["box"]]})
+            
+            # Sort by frequency
+            clusters.sort(key=lambda c: len(c["boxes"]), reverse=True)
+            main_cluster = clusters[0]
+            
+            if len(main_cluster["boxes"]) < 2: # No consensus
+                video.close()
+                return None
+            
+            boxes = np.array(main_cluster["boxes"])
+            # Median box for the streamer
+            median_face = np.median(boxes, axis=0)
+        else:
+            median_face = all_detections[0]["box"]
+
+        # Now apply the "Webcam Border" logic to this median face
+        fx, fy, fw_f, fh_f = median_face
+        frame_w, frame_h = video.size
+        
+        # Simplified "Expand and Sniff" logic
+        # In a real gaming layout, the webcam is usually in a corner and larger than just the face
+        side = int(max(fw_f, fh_f) * 2.8)
+        
+        # Shift slightly up to center face better in the vertical webcam square
+        cy = fy + fh_f/2 - (side * 0.1)
+        cx = fx + fw_f/2
+        
+        nx = int(max(0, min(cx - side/2, frame_w - side)))
+        ny = int(max(0, min(cy - side/2, frame_h - side)))
+        nw = int(min(side, frame_w - nx))
+        nh = int(min(side, frame_h - ny))
+        
+        # Ensure even
+        nx, ny, nw, nh = map(round_to_even, [nx, ny, nw, nh])
+        
+        result_str = f"{nx},{ny},{nw},{nh}"
+        logger.info(f"Robustly detected webcam region: {result_str}")
+        
+        video.close()
+        return result_str
+
+    except Exception as e:
+        logger.error(f"Error in robust webcam detection: {e}")
+        return None
 
 
 def create_gaming_split_clip(
@@ -811,8 +946,30 @@ def detect_faces_in_clip(
                 height, width = frame.shape[:2]
                 detected_faces = []
 
-                # Try MediaPipe first (most accurate)
-                if mp_face_detection is not None:
+                # 0. Try high-performance GPU-accelerated face_recognition first
+                if ML_LIBS_AVAILABLE:
+                    try:
+                        device = "cnn" if dlib.DLIB_USE_CUDA else "hog"
+                        # Downsample for speed
+                        small = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
+                        # upsammple=1 if on GPU to catch small webcams
+                        locs = face_recognition.face_locations(small, number_of_times_to_upsample=1 if device=="cnn" else 0, model=device)
+                        
+                        if locs:
+                            for (top, right, bottom, left) in locs:
+                                # Scale back
+                                fx, fy, fw_f, fh_f = left*2, top*2, (right-left)*2, (bottom-top)*2
+                                if fw_f > 30:
+                                    # Convert to (x, y, w, h, confidence)
+                                    detected_faces.append((fx, fy, fw_f, fh_f, 0.95))
+                            
+                            if detected_faces:
+                                logger.debug(f"face_recognition found {len(detected_faces)} faces at {sample_time}s")
+                    except Exception as e:
+                        logger.warning(f"face_recognition failed at {sample_time}s: {e}")
+
+                # 1. Try MediaPipe first (most accurate CPU)
+                if not detected_faces and mp_face_detection is not None:
                     try:
                         # MediaPipe expects RGB format
                         results = mp_face_detection.process(frame)
